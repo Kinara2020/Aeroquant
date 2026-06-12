@@ -1,0 +1,218 @@
+#define BLYNK_TEMPLATE_ID "TMPL3FMzkK2Jw"
+#define BLYNK_TEMPLATE_NAME "AEROQUANT"
+#define BLYNK_AUTH_TOKEN "YOUR_BLYNK_TOKEN"
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <DHT.h>
+#include <LiquidCrystal_I2C.h>
+
+// ================= WIFI CONFIG =================
+char ssid[] = "YOUR_WIFI_NAME";
+char pass[] = "YOUR_WIFI_PASSWORD";
+
+// ================= DHT11 CONFIG =================
+#define DHTPIN 4
+#define DHTTYPE DHT11
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// ================= MQ135 CONFIG =================
+#define MQ135_PIN 34
+
+// ================= LCD CONFIG =================
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ================= BLYNK TIMER =================
+BlynkTimer timer;
+
+// ================= GLOBAL VARIABLES =================
+float temperature = 0;
+float humidity = 0;
+float voltage = 0;
+float rawAQI = 0;
+float filteredAQI = 0;
+float predictedAQI = 0;
+
+const float alpha = 0.25;
+
+String lastCategory = "";
+
+// =====================================================
+// SENSOR READING
+// =====================================================
+void readSensors() {
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+
+  if (isnan(t) || isnan(h)) {
+    Serial.println("Failed to read from DHT11 sensor!");
+    return;
+  }
+
+  temperature = t;
+  humidity = h;
+
+  int raw = analogRead(MQ135_PIN);
+
+  voltage = raw * (3.3 / 4095.0);
+
+  // Basic AQI estimation
+  rawAQI = voltage * 120.0;
+
+  // Exponential Moving Average Filter
+  filteredAQI =
+      alpha * rawAQI +
+      (1.0 - alpha) * filteredAQI;
+}
+
+// =====================================================
+// LIGHTWEIGHT ML MODEL
+// =====================================================
+float mlModel(float v, float t, float h) {
+
+  float nv = v / 3.3;
+  float nt = t / 50.0;
+  float nh = h / 100.0;
+
+  float score =
+      (0.60 * nv) +
+      (0.25 * nt) +
+      (0.15 * nh);
+
+  return score * 500.0;
+}
+
+// =====================================================
+// AQI CLASSIFICATION
+// =====================================================
+String classify(float aqi) {
+
+  if (aqi < 100)
+    return "VERY GOOD";
+
+  else if (aqi < 200)
+    return "GOOD";
+
+  else if (aqi < 300)
+    return "MODERATE";
+
+  else if (aqi < 400)
+    return "POOR";
+
+  return "VERY POOR";
+}
+
+// =====================================================
+// ALERT SYSTEM
+// =====================================================
+void alerts(String category) {
+
+  if (category != lastCategory) {
+
+    if (category == "MODERATE") {
+      Blynk.logEvent(
+          "warning",
+          "Air quality getting worse");
+    }
+
+    else if (category == "POOR") {
+      Blynk.logEvent(
+          "alert",
+          "Unhealthy air detected");
+    }
+
+    else if (category == "VERY POOR") {
+      Blynk.logEvent(
+          "danger",
+          "Dangerous air!");
+    }
+
+    lastCategory = category;
+  }
+}
+
+// =====================================================
+// SEND DATA TO BLYNK CLOUD
+// =====================================================
+void sendToCloud() {
+
+  predictedAQI =
+      mlModel(voltage,
+              temperature,
+              humidity);
+
+  String category =
+      classify(predictedAQI);
+
+  alerts(category);
+
+  Blynk.virtualWrite(V0, rawAQI);
+  Blynk.virtualWrite(V1, predictedAQI);
+  Blynk.virtualWrite(V2, temperature);
+  Blynk.virtualWrite(V3, humidity);
+  Blynk.virtualWrite(V4, category);
+
+  Serial.print("Raw AQI: ");
+  Serial.println(rawAQI);
+}
+
+// =====================================================
+// LCD UPDATE
+// =====================================================
+void updateLCD() {
+
+  String category =
+      classify(predictedAQI);
+
+  lcd.setCursor(0, 0);
+  lcd.print("T:");
+  lcd.print(temperature, 1);
+  lcd.print(" H:");
+  lcd.print(humidity, 0);
+  lcd.print("   ");
+
+  lcd.setCursor(0, 1);
+  lcd.print("AQI:");
+  lcd.print(predictedAQI, 0);
+  lcd.print(" ");
+  lcd.print(category.substring(0, 4));
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+void setup() {
+
+  Serial.begin(115200);
+
+  dht.begin();
+
+  lcd.init();
+  lcd.backlight();
+
+  Blynk.begin(
+      BLYNK_AUTH_TOKEN,
+      ssid,
+      pass);
+
+  timer.setInterval(
+      2000L,
+      readSensors);
+
+  timer.setInterval(
+      3000L,
+      sendToCloud);
+
+  timer.setInterval(
+      1000L,
+      updateLCD);
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+void loop() {
+  Blynk.run();
+  timer.run();
+}
